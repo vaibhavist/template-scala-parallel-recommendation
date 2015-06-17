@@ -1,4 +1,4 @@
-package org.template.recommendation
+package com.bsb
 
 import io.prediction.controller.PDataSource
 import io.prediction.controller.EmptyEvaluationInfo
@@ -10,8 +10,9 @@ import io.prediction.data.store.PEventStore
 import org.apache.spark.SparkContext
 import org.apache.spark.SparkContext._
 import org.apache.spark.rdd.RDD
-
+import org.apache.spark.rdd.PairRDDFunctions
 import grizzled.slf4j.Logger
+import org.joda.time.{Days, DateTime}
 
 case class DataSourceEvalParams(kFold: Int, queryNum: Int)
 
@@ -25,7 +26,7 @@ class DataSource(val dsp: DataSourceParams)
 
   @transient lazy val logger = Logger[this.type]
 
-  def getRatings(sc: SparkContext): RDD[Rating] = {
+  def getRatingsOld(sc: SparkContext): RDD[Rating] = {
 
     val eventsRDD: RDD[Event] = PEventStore.find(
       appName = dsp.appName,
@@ -52,6 +53,65 @@ class DataSource(val dsp: DataSourceParams)
         }
       }
       rating
+    }.cache()
+
+    ratingsRDD
+  }
+
+  def sum(x: Event): Double = {
+    val dateTime = new DateTime()
+    var ratingValue: Double = 0
+    var userId = ""
+    var itemId = ""
+      userId = x.entityId
+      itemId = x.targetEntityId.get
+      ratingValue = (
+        x.event match {
+          case "deleted" => ratingValue - (9.0 / (1 + Days.daysBetween(x.eventTime.toLocalDate(), dateTime.toLocalDate()).getDays()))
+          case "removed" => ratingValue - (5.0 / (1 + Days.daysBetween(x.eventTime.toLocalDate(), dateTime.toLocalDate()).getDays()))
+          case "unliked" => ratingValue - (6.0 / (1 + Days.daysBetween(x.eventTime.toLocalDate(), dateTime.toLocalDate()).getDays()))
+          case "played" => ratingValue + (2.0 / (1 + Days.daysBetween(x.eventTime.toLocalDate(), dateTime.toLocalDate()).getDays()))
+          case "played_long" => ratingValue + (3.0 / (1 + Days.daysBetween(x.eventTime.toLocalDate(), dateTime.toLocalDate()).getDays()))
+          case "completed" => ratingValue + (4.0 / (1 + Days.daysBetween(x.eventTime.toLocalDate(), dateTime.toLocalDate()).getDays()))
+          case "shared" => ratingValue + (6.0 / (1 + Days.daysBetween(x.eventTime.toLocalDate(), dateTime.toLocalDate()).getDays()))
+          case "rented" => ratingValue + (8.0 / (1 + Days.daysBetween(x.eventTime.toLocalDate(), dateTime.toLocalDate()).getDays()))
+          case "liked" => ratingValue + (5.0 / (1 + Days.daysBetween(x.eventTime.toLocalDate(), dateTime.toLocalDate()).getDays()))
+          case "downloaded" => ratingValue + (7.0 / (1 + Days.daysBetween(x.eventTime.toLocalDate(), dateTime.toLocalDate()).getDays()))
+          case "purchased" => ratingValue + (9.0 / (1 + Days.daysBetween(x.eventTime.toLocalDate(), dateTime.toLocalDate()).getDays()))
+          case _ => throw new Exception(s"Unexpected event ${x} is read.")
+        })
+    logger.error(s"user: " + userId + ", item: " + itemId + ", event rating: " + ratingValue)
+    ratingValue
+  }
+
+  def getRatings(sc: SparkContext): RDD[Rating] = {
+    val dt = new DateTime()
+    val eventsRDD: RDD[Event] = PEventStore.find(
+      appName = dsp.appName,
+      entityType = Some("user"),
+      eventNames = Some(List("deleted", "removed", "unliked", "played", "played_long", "completed", "shared", "rented", "liked", "downloaded", "purchased")),
+      // targetEntityType is optional field of an event.
+      targetEntityType = Some(Some("item"))
+      //startTime = Some(dt.minusDays(9)),
+      //untilTime = Some(dt)
+    )(sc)
+
+    logger.error(s"NUMBER OF LINES : " + eventsRDD.count())
+    val b = eventsRDD.map{
+      case(event) =>
+        (event.entityId, event.targetEntityId, event.eventTime, event.event) -> event
+    }.reduceByKey((x,y) => x)
+
+    val a = b.map{ case(event) =>
+        val userId = event._1._1
+        val itemId = event._1._2.get
+        val rating = sum(event._2) // change
+        val op = ((userId, itemId) -> rating)
+        op
+    }.reduceByKey((x, y) => x + y, 16)
+
+    val ratingsRDD: RDD[Rating] = a.map{ b =>
+      Rating(b._1._1, b._1._2, b._2)
     }.cache()
 
     ratingsRDD
