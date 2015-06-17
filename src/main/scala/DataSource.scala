@@ -1,4 +1,4 @@
-package com.bsb
+package org.template.recommendation
 
 import io.prediction.controller.PDataSource
 import io.prediction.controller.EmptyEvaluationInfo
@@ -26,39 +26,7 @@ class DataSource(val dsp: DataSourceParams)
 
   @transient lazy val logger = Logger[this.type]
 
-  def getRatingsOld(sc: SparkContext): RDD[Rating] = {
-
-    val eventsRDD: RDD[Event] = PEventStore.find(
-      appName = dsp.appName,
-      entityType = Some("user"),
-      eventNames = Some(List("rate", "buy")), // read "rate" and "buy" event
-      // targetEntityType is optional field of an event.
-      targetEntityType = Some(Some("item")))(sc)
-
-    val ratingsRDD: RDD[Rating] = eventsRDD.map { event =>
-      val rating = try {
-        val ratingValue: Double = event.event match {
-          case "rate" => event.properties.get[Double]("rating")
-          case "buy" => 4.0 // map buy event to rating value of 4
-          case _ => throw new Exception(s"Unexpected event ${event} is read.")
-        }
-        // entityId and targetEntityId is String
-        Rating(event.entityId,
-          event.targetEntityId.get,
-          ratingValue)
-      } catch {
-        case e: Exception => {
-          logger.error(s"Cannot convert ${event} to Rating. Exception: ${e}.")
-          throw e
-        }
-      }
-      rating
-    }.cache()
-
-    ratingsRDD
-  }
-
-  def sum(x: Event): Double = {
+  def eventEval(x: Event): Double = {
     val dateTime = new DateTime()
     var ratingValue: Double = 0
     var userId = ""
@@ -80,7 +48,6 @@ class DataSource(val dsp: DataSourceParams)
           case "purchased" => ratingValue + (9.0 / (1 + Days.daysBetween(x.eventTime.toLocalDate(), dateTime.toLocalDate()).getDays()))
           case _ => throw new Exception(s"Unexpected event ${x} is read.")
         })
-    logger.error(s"user: " + userId + ", item: " + itemId + ", event rating: " + ratingValue)
     ratingValue
   }
 
@@ -96,19 +63,20 @@ class DataSource(val dsp: DataSourceParams)
       //untilTime = Some(dt)
     )(sc)
 
-    logger.error(s"NUMBER OF LINES : " + eventsRDD.count())
+    // removing duplicate events 
     val b = eventsRDD.map{
       case(event) =>
         (event.entityId, event.targetEntityId, event.eventTime, event.event) -> event
     }.reduceByKey((x,y) => x)
 
+    // adding events score to arrive at a common rating
     val a = b.map{ case(event) =>
         val userId = event._1._1
         val itemId = event._1._2.get
-        val rating = sum(event._2) // change
+        val rating = eventEval(event._2)
         val op = ((userId, itemId) -> rating)
         op
-    }.reduceByKey((x, y) => x + y, 16)
+    }.reduceByKey((x, y) => x + y)
 
     val ratingsRDD: RDD[Rating] = a.map{ b =>
       Rating(b._1._1, b._1._2, b._2)
