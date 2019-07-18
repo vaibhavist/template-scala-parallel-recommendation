@@ -2,7 +2,7 @@
 
 ## Documentation
 
-Please refer to http://docs.prediction.io/templates/recommendation/quickstart/
+Please refer to https://predictionio.apache.org/templates/recommendation/quickstart/
 
 ## Versions
 
